@@ -492,10 +492,11 @@
   <div class="editor">
     <div class="hint">
       Cada slide fica separado por uma linha com <code>---</code>, <code>===</code> ou <code>[slide]</code>.<br>
-      <b>Colando do ChatGPT?</b> Peça a ele para separar os slides com <code>===</code> — o <code>---</code> vira linha horizontal no chat e some ao copiar. Se mesmo assim vier sem separador, os títulos <code>## Assim</code> são usados como quebra.<br>
+      <b>Colando do ChatGPT?</b> Pode colar do jeito que vier: se não houver separador nenhum, os slides são deduzidos pelo formato do texto. Use <b>✂️ Separar slides</b> para escrever os <code>---</code> no texto e revisar as quebras.<br>
       Primeira linha do slide = título. Linhas com <code>- </code> viram lista. Tabelas em markdown (<code>| a | b |</code>) viram tabela — pode colar direto do ChatGPT, mesmo bagunçada. Use <code>**negrito**</code> para destacar. Toque numa imagem da galeria para inseri-la — depois arraste ela na prévia para posicionar.
     </div>
     <div class="fileRow">
+      <button id="autoSepBtn">✂️ Separar slides</button>
       <button id="saveTxt">💾 Salvar texto</button>
       <button id="openTxtBtn">📂 Abrir arquivo</button>
       <input type="file" id="openTxt" accept=".txt,.md" style="display:none">
@@ -876,6 +877,81 @@ function splitByHeadings(text){
   return out.map(b => b.trim()).filter(Boolean);
 }
 
+/* ---------- Separacao automatica (ultimo recurso) ----------
+   O ChatGPT muitas vezes nao entrega separador nenhum: o --- vira linha
+   horizontal e os ## viram texto grande, e o que sobra e prosa corrida.
+   Aqui deduzimos onde cada slide comeca pelo formato do texto:
+   titulo = linha curta, sem pontuacao final, logo depois de uma frase
+   terminada em ponto (ou logo antes de uma lista). */
+const SENTENCE_END_RE = /[.!?]["')\]]?$/;
+
+function findTitleLines(lines){
+  const meaningful = [];
+  lines.forEach((l, i) => { if(l.trim()) meaningful.push(i); });
+
+  const isBulletLine = l => BULLET_RE.test(l.trim());
+  const titleLike = l => {
+    const t = l.trim();
+    if(!t || isBulletLine(t) || isPipeLine(t)) return false;
+    if(t.length > 70) return false;
+    if(/[.,;:!]$/.test(t)) return false;
+    if(!/[A-Za-zÀ-ÿ]{3,}/.test(t)) return false;      // exclui "0", "1", MAC, IP
+    const c = t.indexOf(':');                          // "Exemplo: 00:1A:2B..." e dado, nao titulo
+    if(c > -1){
+      const tail = t.slice(c + 1).trim();
+      const letras = (tail.match(/[A-Za-zÀ-ÿ]/g) || []).length;
+      if(tail && letras / tail.length < 0.5) return false;
+    }
+    return true;
+  };
+
+  const titles = new Set();
+  let prevWasTitle = false;
+  meaningful.forEach((li, k) => {
+    const l = lines[li];
+    let yes = false;
+    if(titleLike(l)){
+      const prev = k > 0 ? lines[meaningful[k - 1]].trim() : null;
+      const next = k < meaningful.length - 1 ? lines[meaningful[k + 1]].trim() : null;
+      if(k === 0) yes = true;                                    // primeira linha
+      else if(next && isBulletLine(next)) yes = true;            // titulo logo antes de uma lista
+      else if(!prevWasTitle && (SENTENCE_END_RE.test(prev) || isBulletLine(prev))) yes = true;
+    }
+    if(yes) titles.add(li);
+    prevWasTitle = yes;
+  });
+  return titles;
+}
+
+/* devolve os blocos deduzidos, ou null se nao der pra deduzir com seguranca */
+function autoSplitBlocks(text){
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  if(lines.filter(l => l.trim()).length < 12) return null;   // texto curto: nao arrisca
+  const titles = findTitleLines(lines);
+  if(titles.size < 3) return null;
+  const out = [];
+  let cur = [];
+  lines.forEach((l, i) => {
+    if(titles.has(i) && cur.length){ out.push(cur.join('\n')); cur = []; }
+    cur.push(l);
+  });
+  if(cur.length) out.push(cur.join('\n'));
+  const blocks = out.map(b => b.trim()).filter(Boolean);
+  return blocks.length > 1 ? blocks : null;
+}
+
+/* mesma deducao, mas escrevendo --- no texto para o usuario poder revisar */
+function autoSplitToText(raw){
+  const lines = raw.replace(/\r\n?/g, '\n').split('\n');
+  const titles = findTitleLines(lines);
+  const out = [];
+  lines.forEach((l, i) => {
+    if(titles.has(i) && out.some(x => x.trim())) out.push('---');
+    out.push(l);
+  });
+  return out.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
 function splitSlideBlocks(raw){
   const lines = raw.replace(/\r\n?/g, '\n').split('\n');   // normaliza CRLF
   const out = [];
@@ -886,7 +962,9 @@ function splitSlideBlocks(raw){
   });
   out.push(cur.join('\n'));
   const blocks = out.map(b => b.trim()).filter(Boolean);
-  return blocks.length > 1 ? blocks : (splitByHeadings(blocks[0] || '') || blocks);
+  if(blocks.length > 1) return blocks;
+  const only = blocks[0] || '';
+  return splitByHeadings(only) || autoSplitBlocks(only) || blocks;
 }
 
 /* limpa "## ", "1. " e "**" do titulo colado do chat */
@@ -1477,6 +1555,19 @@ function exportPptx(){
 document.getElementById('pptxBtn').addEventListener('click', exportPptx);
 
 /* ---------- Save / open source text ---------- */
+document.getElementById('autoSepBtn').addEventListener('click', () => {
+  const raw = srcEl.value;
+  if(!raw.trim()){ alert('Cole o texto dos slides primeiro.'); return; }
+  const jaTem = raw.replace(/\r\n?/g, '\n').split('\n').some(isSlideSeparator);
+  if(jaTem && !confirm('O texto já tem separadores. Adicionar mais quebras automáticas mesmo assim?')) return;
+  const novo = autoSplitToText(raw);
+  const qtd = novo.split('\n').filter(isSlideSeparator).length + 1;
+  if(qtd < 2){ alert('Não consegui identificar títulos de slide neste texto.'); return; }
+  srcEl.value = novo;
+  update();
+  alert(`Separadores inseridos: ${qtd} slides.\n\nConfira o texto — os --- foram deduzidos pelo formato, então pode ser que algum precise ser movido ou apagado.`);
+});
+
 document.getElementById('saveTxt').addEventListener('click', () => {
   const blob = new Blob([srcEl.value], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
