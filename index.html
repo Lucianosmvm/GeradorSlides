@@ -249,7 +249,8 @@
     align-items:center;
     justify-content:center;
     padding:20px;
-    overflow:auto;
+    overflow:hidden;
+    min-width:0;
     min-height:0;
   }
   .stageFrame{
@@ -657,19 +658,35 @@ let bgImageDataUrl = null;
 let imageLibrary = {};
 let imageCounter = 0;
 
+let lastScale = -1;
 function scaleStage(){
   if(!stageOuter || !stageFrame) return;
-  const availW = stageOuter.clientWidth - 4;
-  const availH = stageOuter.clientHeight - 4;
+  /* clientWidth/Height incluem o padding do .stageOuter: precisa descontar,
+     senao o frame fica maior que a area util, aparece scrollbar, o clientWidth
+     encolhe, o ResizeObserver dispara de novo e a preview fica tremendo. */
+  const cs = getComputedStyle(stageOuter);
+  const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+  const availW = stageOuter.clientWidth - padX - 2;
+  const availH = stageOuter.clientHeight - padY - 2;
   const scale = Math.max(0.05, Math.min(availW / BASE_W, availH / BASE_H));
+  if(Math.abs(scale - lastScale) < 0.0005) return;
+  lastScale = scale;
   stage.style.transform = `scale(${scale})`;
-  stageFrame.style.width = (BASE_W * scale) + 'px';
-  stageFrame.style.height = (BASE_H * scale) + 'px';
+  /* floor: evita meio pixel de sobra que reintroduz a scrollbar em zoom 100% */
+  stageFrame.style.width = Math.floor(BASE_W * scale) + 'px';
+  stageFrame.style.height = Math.floor(BASE_H * scale) + 'px';
 }
 
-window.addEventListener('resize', scaleStage);
+let scaleRaf = 0;
+function requestScaleStage(){
+  if(scaleRaf) return;
+  scaleRaf = requestAnimationFrame(() => { scaleRaf = 0; scaleStage(); });
+}
+
+window.addEventListener('resize', requestScaleStage);
 if(window.ResizeObserver){
-  new ResizeObserver(scaleStage).observe(stageOuter);
+  new ResizeObserver(requestScaleStage).observe(stageOuter);
 }
 
 function inlineFormat(text){
