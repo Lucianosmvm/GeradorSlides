@@ -470,7 +470,8 @@
 <main>
   <div class="editor">
     <div class="hint">
-      Cada slide fica separado por uma linha com <code>---</code>.<br>
+      Cada slide fica separado por uma linha com <code>---</code>, <code>===</code> ou <code>[slide]</code>.<br>
+      <b>Colando do ChatGPT?</b> Peça a ele para separar os slides com <code>===</code> — o <code>---</code> vira linha horizontal no chat e some ao copiar. Se mesmo assim vier sem separador, os títulos <code>## Assim</code> são usados como quebra.<br>
       Primeira linha do slide = título. Linhas com <code>- </code> viram lista. Use <code>**negrito**</code> para destacar. Toque numa imagem da galeria para inseri-la — depois arraste ela na prévia para posicionar.
     </div>
     <div class="fileRow">
@@ -714,10 +715,70 @@ function imgTagHtml(id){
   return `<img src="${img.dataUrl}" alt="${id}" class="slide-img">`;
 }
 
+/* Caracteres aceitos como "regua" separadora. O ChatGPT renderiza --- (e *** e ___)
+   como linha horizontal no chat, entao ao copiar da interface o separador some.
+   Por isso aceitamos varias formas: peca ao GPT para usar === ou [slide], que ele
+   nao converte em <hr> e portanto sobrevive ao copiar/colar. */
+const RULE_CHARS = '-*_=~\u2014\u2013\u2500\u2550\u25ac';
+
+/* Marcadores de lista. Alem de "- ", o ChatGPT solta "* ", "+ " e bullets unicode
+   (•, ‣, ◦, –) dependendo de como o texto e copiado. "* " nao conflita com
+   **negrito**, que nunca tem espaco depois do primeiro asterisco. */
+const BULLET_RE = /^[-*+\u2022\u2023\u25e6\u2043\u2013\u2014]\s+/;
+
+function isSlideSeparator(line){
+  const t = line.trim();
+  if(!t) return false;
+  if(/^(?:<!--\s*slide\s*-->|[\[{]\s*slide\s*[\]}])$/i.test(t)) return true;
+  const compact = t.replace(/[ \t]/g, '');   // aceita "- - -" alem de "---"
+  if(compact.length < 3) return false;
+  const c = compact[0];
+  if(RULE_CHARS.indexOf(c) === -1) return false;
+  return compact.split('').every(ch => ch === c);
+}
+
+/* Fallback: se o separador foi engolido na copia do chat, mas o texto tem varios
+   titulos markdown (## Slide), usa os titulos como quebra de slide. */
+function splitByHeadings(text){
+  const lines = text.split('\n');
+  const isHeading = l => /^#{1,6}\s+\S/.test(l);
+  if(lines.filter(isHeading).length < 2) return null;
+  const out = [];
+  let cur = [];
+  lines.forEach(line => {
+    if(isHeading(line)){ if(cur.length) out.push(cur.join('\n')); cur = [line]; }
+    else cur.push(line);
+  });
+  if(cur.length) out.push(cur.join('\n'));
+  return out.map(b => b.trim()).filter(Boolean);
+}
+
+function splitSlideBlocks(raw){
+  const lines = raw.replace(/\r\n?/g, '\n').split('\n');   // normaliza CRLF
+  const out = [];
+  let cur = [];
+  lines.forEach(line => {
+    if(isSlideSeparator(line)){ out.push(cur.join('\n')); cur = []; }
+    else cur.push(line);
+  });
+  out.push(cur.join('\n'));
+  const blocks = out.map(b => b.trim()).filter(Boolean);
+  return blocks.length > 1 ? blocks : (splitByHeadings(blocks[0] || '') || blocks);
+}
+
+/* limpa "## ", "1. " e "**" do titulo colado do chat */
+function cleanTitle(line){
+  return (line || '').trim()
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/^\d+[.)]\s+/, '')
+    .replace(/^\*\*(.+?)\*\*$/, '$1')
+    .trim();
+}
+
 function parseSlides(raw){
-  return raw.split(/\n-{3,}\n/).map(block => block.trim()).filter(Boolean).map(block => {
+  return splitSlideBlocks(raw).map(block => {
     const lines = block.split('\n');
-    const title = lines.shift().trim();
+    const title = cleanTitle(lines.shift());
     const rest = lines.join('\n').trim();
 
     // split into paragraphs/lists/images by blank lines
@@ -728,7 +789,7 @@ function parseSlides(raw){
       const chunkLines = chunk.split('\n').map(l=>l.trim()).filter(Boolean);
       const rawImgMatch = chunkLines.length === 1 && chunkLines[0].match(/^!\[(.+?)\]$/);
       const imgInfo = rawImgMatch ? parseImgTagInner(rawImgMatch[1].trim()) : null;
-      const isList = !imgInfo && chunkLines.every(l => l.startsWith('- ') || l.startsWith('• '));
+      const isList = !imgInfo && chunkLines.every(l => BULLET_RE.test(l));
       if(imgInfo){
         if(imgInfo.positioned){
           // rendered as a free-floating overlay, not part of the text flow
@@ -738,7 +799,7 @@ function parseSlides(raw){
           blocks.push({ type:'img', ...imgInfo });
         }
       } else if(isList){
-        const items = chunkLines.map(l => l.replace(/^[-•]\s*/,''));
+        const items = chunkLines.map(l => l.replace(BULLET_RE, ''));
         bodyHtml += '<ul>' + items.map(t => `<li>${inlineFormat(t)}</li>`).join('') + '</ul>';
         blocks.push({ type:'ul', items });
       } else {
