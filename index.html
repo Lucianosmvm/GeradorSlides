@@ -331,6 +331,23 @@
   }
   .slide-body li{margin-bottom:.35em;}
   .slide-body b, .slide-body strong{color:var(--ink);}
+  .slide-body .slide-code{
+    background:#f4f6f8;
+    border:1px solid #e2e6ec;
+    border-left:3px solid #9aa5b4;
+    border-radius:4px;
+    padding:.5em .7em;
+    margin:.5em 0 .8em 0;
+    overflow-x:auto;
+  }
+  .slide-body .slide-code code{
+    font-family:Consolas,"Courier New",monospace;
+    font-size:.88em;
+    line-height:1.45;
+    white-space:pre;
+    color:#2f3b4c;
+    display:block;
+  }
   .slide-body .slide-table{
     width:100%;
     border-collapse:collapse;
@@ -493,7 +510,7 @@
     <div class="hint">
       Cada slide fica separado por uma linha com <code>---</code>, <code>===</code> ou <code>[slide]</code>.<br>
       <b>Colando do ChatGPT?</b> Pode colar do jeito que vier: se não houver separador nenhum, os slides são deduzidos pelo formato do texto. Use <b>✂️ Separar slides</b> para escrever os <code>---</code> no texto e revisar as quebras.<br>
-      Primeira linha do slide = título. Linhas com <code>- </code> viram lista. Tabelas em markdown (<code>| a | b |</code>) viram tabela — pode colar direto do ChatGPT, mesmo bagunçada. Use <code>**negrito**</code> para destacar. Toque numa imagem da galeria para inseri-la — depois arraste ela na prévia para posicionar.
+      Primeira linha do slide = título. Linhas com <code>- </code> viram lista. Tabelas em markdown (<code>| a | b |</code>) viram tabela — pode colar direto do ChatGPT, mesmo bagunçada. Trechos entre <code>```</code> viram bloco de código. Use <code>**negrito**</code> para destacar. Toque numa imagem da galeria para inseri-la — depois arraste ela na prévia para posicionar.
     </div>
     <div class="fileRow">
       <button id="autoSepBtn">✂️ Separar slides</button>
@@ -741,7 +758,48 @@ function imgTagHtml(id){
    como linha horizontal no chat, entao ao copiar da interface o separador some.
    Por isso aceitamos varias formas: peca ao GPT para usar === ou [slide], que ele
    nao converte em <hr> e portanto sobrevive ao copiar/colar. */
-const RULE_CHARS = '-*_=~\u2014\u2013\u2500\u2550\u25ac';
+const RULE_CHARS = '-*_=\u2014\u2013\u2500\u2550\u25ac';
+
+/* ---------- Blocos de codigo ----------
+   Linhas com ``` (ou ~~~) delimitam codigo. O conteudo e retirado do texto ANTES
+   de qualquer outra analise e trocado por um marcador, para que --- , | e * que
+   estejam dentro do codigo nao virem separador de slide, tabela ou lista. */
+const FENCE_RE = /^(?:`{3,}|~{3,})\s*[A-Za-z0-9_+#.-]*$/;
+const CODE_TOKEN_RE = /^\u0000CODE(\d+)\u0000$/;
+
+function escapeHtml(t){
+  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function extractCodeBlocks(text){
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const codes = [];
+  const out = [];
+  let i = 0;
+  while(i < lines.length){
+    if(FENCE_RE.test(lines[i].trim())){
+      let j = i + 1;
+      while(j < lines.length && !FENCE_RE.test(lines[j].trim())) j++;
+      if(j < lines.length){                      // so trata como codigo se fechar
+        const body = lines.slice(i + 1, j).join('\n').replace(/^\s*\n+|\n+\s*$/g, '');
+        if(body.trim()){
+          out.push('', '\u0000CODE' + codes.length + '\u0000', '');
+          codes.push(body);
+        }
+        i = j + 1;
+        continue;
+      }
+      // sem fechamento: deixa a linha como texto comum
+    }
+    out.push(lines[i]);
+    i++;
+  }
+  return { text: out.join('\n'), codes };
+}
+
+function codeHtml(code){
+  return `<pre class="slide-code"><code>${escapeHtml(code)}</code></pre>`;
+}
 
 /* ---------- Tabelas ----------
    Ao copiar uma tabela renderizada do ChatGPT, cada celula cai numa linha propria
@@ -893,6 +951,7 @@ function findTitleLines(lines){
   const titleLike = l => {
     const t = l.trim();
     if(!t || isBulletLine(t) || isPipeLine(t)) return false;
+    if(t.indexOf('\u0000') > -1) return false;        // marcador de bloco de codigo
     if(t.length > 70) return false;
     if(/[.,;:!]$/.test(t)) return false;
     if(!/[A-Za-zÀ-ÿ]{3,}/.test(t)) return false;      // exclui "0", "1", MAC, IP
@@ -977,7 +1036,8 @@ function cleanTitle(line){
 }
 
 function parseSlides(raw){
-  return splitSlideBlocks(raw).map(block => {
+  const { text: semCodigo, codes } = extractCodeBlocks(raw);
+  return splitSlideBlocks(semCodigo).map(block => {
     const lines = block.split('\n');
     const title = cleanTitle(lines.shift());
     const rest = repairTables(lines.join('\n').trim());
@@ -990,6 +1050,13 @@ function parseSlides(raw){
       const chunkLines = chunk.split('\n').map(l=>l.trim()).filter(Boolean);
       const rawImgMatch = chunkLines.length === 1 && chunkLines[0].match(/^!\[(.+?)\]$/);
       const imgInfo = rawImgMatch ? parseImgTagInner(rawImgMatch[1].trim()) : null;
+      const codeMatch = chunkLines.length === 1 && chunkLines[0].match(CODE_TOKEN_RE);
+      if(codeMatch){
+        const code = codes[Number(codeMatch[1])];
+        bodyHtml += codeHtml(code);
+        blocks.push({ type:'code', text: code });
+        return;
+      }
       const isTable = !imgInfo && chunkLines.length > 1 && chunkLines.every(isPipeLine);
       const isList = !imgInfo && !isTable && chunkLines.every(l => BULLET_RE.test(l));
       if(isTable){
@@ -1299,6 +1366,23 @@ function exportForPrint(){
   .slide-body ul{margin:.2em 0 0 0;padding-left:1.2em;list-style:disc;}
   .slide-body li{margin-bottom:.35em;}
   .slide-body strong{color:#3d4a5c;}
+  .slide-body .slide-code{
+    background:#f4f6f8;
+    border:1px solid #e2e6ec;
+    border-left:3px solid #9aa5b4;
+    border-radius:4px;
+    padding:.5em .7em;
+    margin:.5em 0 .8em 0;
+    overflow-x:auto;
+  }
+  .slide-body .slide-code code{
+    font-family:Consolas,"Courier New",monospace;
+    font-size:.88em;
+    line-height:1.45;
+    white-space:pre;
+    color:#2f3b4c;
+    display:block;
+  }
   .slide-body .slide-table{
     width:100%;
     border-collapse:collapse;
@@ -1429,6 +1513,17 @@ function renderPptxBody(slide, blocks, x, y, w){
         slide.addImage({ data: img.dataUrl, x: dispX, y: cursorY, w: dispW, h: dispH });
         cursorY += dispH + PARA_GAP;
       }
+    } else if(block.type === 'code'){
+      flushText();
+      const nLinhas = block.text.split('\n').length;
+      const h = Math.max(0.45, nLinhas * 0.24 + 0.22);
+      slide.addText(block.text, {
+        x, y: cursorY, w, h,
+        fontSize: 12, fontFace: 'Consolas', color: '2F3B4C',
+        fill: { color: 'F4F6F8' }, line: { color: 'E2E6EC', width: 0.5 },
+        valign: 'top', margin: 6
+      });
+      cursorY += h + PARA_GAP;
     } else if(block.type === 'table'){
       flushText();
       const ROW_H = 0.34;
