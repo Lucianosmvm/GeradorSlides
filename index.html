@@ -331,6 +331,27 @@
   }
   .slide-body li{margin-bottom:.35em;}
   .slide-body b, .slide-body strong{color:var(--ink);}
+  .slide-body .slide-table{
+    width:100%;
+    border-collapse:collapse;
+    margin:.5em 0 .8em 0;
+    font-size:.92em;
+    line-height:1.35;
+  }
+  .slide-body .slide-table th,
+  .slide-body .slide-table td{
+    border:1px solid #d8dde4;
+    padding:.38em .6em;
+    text-align:left;
+    vertical-align:top;
+  }
+  .slide-body .slide-table thead th{
+    background:#eef1f5;
+    font-weight:700;
+    color:#2f3b4c;
+    border-bottom:2px solid #b9c2cf;
+  }
+  .slide-body .slide-table tbody tr:nth-child(even) td{ background:#fafbfc; }
   .slide-body .slide-img{
     display:block;
     max-width:100%;
@@ -472,7 +493,7 @@
     <div class="hint">
       Cada slide fica separado por uma linha com <code>---</code>, <code>===</code> ou <code>[slide]</code>.<br>
       <b>Colando do ChatGPT?</b> Peça a ele para separar os slides com <code>===</code> — o <code>---</code> vira linha horizontal no chat e some ao copiar. Se mesmo assim vier sem separador, os títulos <code>## Assim</code> são usados como quebra.<br>
-      Primeira linha do slide = título. Linhas com <code>- </code> viram lista. Use <code>**negrito**</code> para destacar. Toque numa imagem da galeria para inseri-la — depois arraste ela na prévia para posicionar.
+      Primeira linha do slide = título. Linhas com <code>- </code> viram lista. Tabelas em markdown (<code>| a | b |</code>) viram tabela — pode colar direto do ChatGPT, mesmo bagunçada. Use <code>**negrito**</code> para destacar. Toque numa imagem da galeria para inseri-la — depois arraste ela na prévia para posicionar.
     </div>
     <div class="fileRow">
       <button id="saveTxt">💾 Salvar texto</button>
@@ -721,6 +742,108 @@ function imgTagHtml(id){
    nao converte em <hr> e portanto sobrevive ao copiar/colar. */
 const RULE_CHARS = '-*_=~\u2014\u2013\u2500\u2550\u25ac';
 
+/* ---------- Tabelas ----------
+   Ao copiar uma tabela renderizada do ChatGPT, cada celula cai numa linha propria
+   separada por linhas em branco e por "|" soltos. repairTables() remonta esse
+   formato (e tambem aceita a tabela markdown normal) numa forma canonica
+   "| a | b | c |" por linha, antes do texto ser dividido em paragrafos. */
+const DELIM_CELL_RE = /^:?-{1,}:?$/;
+
+function isPipeLine(l){ return l.trim().startsWith('|'); }
+
+/* devolve [head, rows] a partir dos tokens achatados da regiao, ou null */
+function cellsFromFlat(flat){
+  const inner = flat.trim().replace(/^\|/, '').replace(/\|$/, '');
+  const tokens = inner.split('|').map(t => t.trim());
+  // a largura da tabela = maior sequencia de celulas delimitadoras (--- | --- | ---)
+  let n = 0, run = 0;
+  tokens.forEach(t => {
+    if(DELIM_CELL_RE.test(t)){ run++; if(run > n) n = run; }
+    else run = 0;
+  });
+  if(n < 1) return null;
+  const rows = [];
+  for(let i = 0; i < tokens.length; ){
+    const row = tokens.slice(i, i + n);
+    if(row.length < n) break;
+    rows.push(row);
+    i += n;
+    if(tokens[i] === '') i++;          // token vazio = fronteira entre linhas
+  }
+  const clean = rows.filter(r => !r.every(c => DELIM_CELL_RE.test(c)));
+  if(clean.length < 1) return null;
+  return clean;
+}
+
+/* tabela markdown ja bem formada: uma linha "| a | b |" por linha de texto */
+function cellsFromLines(lines){
+  const rows = lines.map(l =>
+    l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+  );
+  const clean = rows.filter(r => !r.every(c => DELIM_CELL_RE.test(c)));
+  return clean.length ? clean : null;
+}
+
+function repairTables(text){
+  const lines = text.split('\n');
+  const out = [];
+  let i = 0;
+  const nextNonBlank = k => { while(k < lines.length && !lines[k].trim()) k++; return k; };
+  const isProperRow = l => { const t = l.trim(); return t.startsWith('|') && t.endsWith('|') && t.length > 2; };
+
+  while(i < lines.length){
+    if(!isPipeLine(lines[i])){ out.push(lines[i]); i++; continue; }
+
+    // run "colado": linhas | consecutivas, sem atravessar linha em branco
+    let end = i;
+    while(end < lines.length && lines[end].trim() && isPipeLine(lines[end])) end++;
+    const tight = lines.slice(i, end).map(l => l.trim());
+    // tabela markdown ja bem formada nao atravessa linha em branco: assim duas
+    // tabelas seguidas continuam sendo duas, e o texto depois nao e engolido
+    const clean = tight.every(isProperRow);
+
+    let region, consumedEnd;
+    if(clean){
+      region = tight;
+      consumedEnd = end;
+    } else {
+      // formato baguncado do chat: atravessa linhas em branco e textos de celula
+      // que estejam ensanduichados entre duas linhas "|"
+      region = [];
+      let j = i;
+      consumedEnd = i;
+      while(j < lines.length){
+        if(!lines[j].trim()){ j++; continue; }
+        if(isPipeLine(lines[j])){ region.push(lines[j].trim()); j++; consumedEnd = j; continue; }
+        const k = nextNonBlank(j + 1);
+        if(k < lines.length && isPipeLine(lines[k])){ region.push(lines[j].trim()); j++; consumedEnd = j; continue; }
+        break;
+      }
+    }
+
+    let rows = clean ? cellsFromLines(region) : cellsFromFlat(region.join(' '));
+    if(!rows && region.length && region.every(isProperRow)) rows = cellsFromLines(region);
+
+    if(rows && rows.length){
+      // isola a tabela com linhas em branco: assim ela vira um "chunk" proprio e
+      // nao se mistura com o texto colado logo antes/depois sem linha em branco
+      if(out.length && out[out.length - 1].trim()) out.push('');
+      rows.forEach(r => out.push('| ' + r.join(' | ') + ' |'));
+      out.push('');
+      i = consumedEnd;
+    } else {
+      out.push(lines[i]); i++;
+    }
+  }
+  return out.join('\n');
+}
+
+function tableHtml(head, rows){
+  const th = head.map(c => `<th>${inlineFormat(c)}</th>`).join('');
+  const tb = rows.map(r => '<tr>' + r.map(c => `<td>${inlineFormat(c)}</td>`).join('') + '</tr>').join('');
+  return `<table class="slide-table"><thead><tr>${th}</tr></thead><tbody>${tb}</tbody></table>`;
+}
+
 /* Marcadores de lista. Alem de "- ", o ChatGPT solta "* ", "+ " e bullets unicode
    (•, ‣, ◦, –) dependendo de como o texto e copiado. "* " nao conflita com
    **negrito**, que nunca tem espaco depois do primeiro asterisco. */
@@ -779,7 +902,7 @@ function parseSlides(raw){
   return splitSlideBlocks(raw).map(block => {
     const lines = block.split('\n');
     const title = cleanTitle(lines.shift());
-    const rest = lines.join('\n').trim();
+    const rest = repairTables(lines.join('\n').trim());
 
     // split into paragraphs/lists/images by blank lines
     const chunks = rest.split(/\n\s*\n/).filter(c => c.trim().length);
@@ -789,7 +912,18 @@ function parseSlides(raw){
       const chunkLines = chunk.split('\n').map(l=>l.trim()).filter(Boolean);
       const rawImgMatch = chunkLines.length === 1 && chunkLines[0].match(/^!\[(.+?)\]$/);
       const imgInfo = rawImgMatch ? parseImgTagInner(rawImgMatch[1].trim()) : null;
-      const isList = !imgInfo && chunkLines.every(l => BULLET_RE.test(l));
+      const isTable = !imgInfo && chunkLines.length > 1 && chunkLines.every(isPipeLine);
+      const isList = !imgInfo && !isTable && chunkLines.every(l => BULLET_RE.test(l));
+      if(isTable){
+        const rows = cellsFromLines(chunkLines);
+        if(rows && rows.length){
+          const head = rows[0];
+          const body = rows.slice(1);
+          bodyHtml += tableHtml(head, body);
+          blocks.push({ type:'table', head, rows: body });
+          return;
+        }
+      }
       if(imgInfo){
         if(imgInfo.positioned){
           // rendered as a free-floating overlay, not part of the text flow
@@ -1087,6 +1221,27 @@ function exportForPrint(){
   .slide-body ul{margin:.2em 0 0 0;padding-left:1.2em;list-style:disc;}
   .slide-body li{margin-bottom:.35em;}
   .slide-body strong{color:#3d4a5c;}
+  .slide-body .slide-table{
+    width:100%;
+    border-collapse:collapse;
+    margin:.5em 0 .8em 0;
+    font-size:.92em;
+    line-height:1.35;
+  }
+  .slide-body .slide-table th,
+  .slide-body .slide-table td{
+    border:1px solid #d8dde4;
+    padding:.38em .6em;
+    text-align:left;
+    vertical-align:top;
+  }
+  .slide-body .slide-table thead th{
+    background:#eef1f5;
+    font-weight:700;
+    color:#2f3b4c;
+    border-bottom:2px solid #b9c2cf;
+  }
+  .slide-body .slide-table tbody tr:nth-child(even) td{ background:#fafbfc; }
   .slide-body .slide-img{
     display:block;
     max-width:100%;
@@ -1196,6 +1351,26 @@ function renderPptxBody(slide, blocks, x, y, w){
         slide.addImage({ data: img.dataUrl, x: dispX, y: cursorY, w: dispW, h: dispH });
         cursorY += dispH + PARA_GAP;
       }
+    } else if(block.type === 'table'){
+      flushText();
+      const ROW_H = 0.34;
+      const nCols = block.head.length || 1;
+      const colW = Array(nCols).fill(w / nCols);
+      const headRow = block.head.map(c => ({
+        text: c,
+        options: { bold: true, color: '2F3B4C', fill: { color: 'EEF1F5' }, valign: 'middle' }
+      }));
+      const bodyRows = block.rows.map(r => r.map(c => ({
+        text: c,
+        options: { color: '3D4A5C', valign: 'middle' }
+      })));
+      slide.addTable([headRow, ...bodyRows], {
+        x, y: cursorY, w, colW,
+        fontSize: 13, fontFace: 'Arial', align: 'left',
+        border: { type: 'solid', pt: 0.5, color: 'D8DDE4' },
+        margin: 4, autoPage: false
+      });
+      cursorY += (block.rows.length + 1) * ROW_H + PARA_GAP;
     } else if(block.type === 'ul'){
       block.items.forEach(item => {
         const segs = mdRuns(item);
